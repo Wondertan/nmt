@@ -9,7 +9,7 @@ import (
 	"math/bits"
 
 	"github.com/celestiaorg/nmt/namespace"
-	pb "github.com/celestiaorg/nmt/pb"
+	"github.com/celestiaorg/nmt/pb"
 )
 
 // ErrFailedCompletenessCheck indicates that the verification of a namespace proof failed due to the lack of completeness property.
@@ -47,6 +47,8 @@ type Proof struct {
 	// omitted if feasible. For a more in-depth understanding of this field,
 	// refer to the "HashNode" method in the "Hasher.
 	isMaxNamespaceIDIgnored bool
+
+	hashForRoot hash.Hash
 }
 
 func (proof Proof) MarshalJSON() ([]byte, error) {
@@ -118,24 +120,28 @@ func (proof Proof) IsMaxNamespaceIDIgnored() bool {
 // NewEmptyRangeProof constructs a proof that proves that a namespace.ID does
 // not fall within the range of an NMT.
 func NewEmptyRangeProof(ignoreMaxNamespace bool) Proof {
-	return Proof{0, 0, nil, nil, ignoreMaxNamespace}
+	return Proof{0, 0, nil, nil, ignoreMaxNamespace, nil}
 }
 
 // NewInclusionProof constructs a proof that proves that a namespace.ID is
 // included in an NMT.
 func NewInclusionProof(proofStart, proofEnd int, proofNodes [][]byte, ignoreMaxNamespace bool) Proof {
-	return Proof{proofStart, proofEnd, proofNodes, nil, ignoreMaxNamespace}
+	return Proof{proofStart, proofEnd, proofNodes, nil, ignoreMaxNamespace, nil}
 }
 
 // NewAbsenceProof constructs a proof that proves that a namespace.ID falls
 // within the range of an NMT but no leaf with that namespace.ID is included.
 func NewAbsenceProof(proofStart, proofEnd int, proofNodes [][]byte, leafHash []byte, ignoreMaxNamespace bool) Proof {
-	return Proof{proofStart, proofEnd, proofNodes, leafHash, ignoreMaxNamespace}
+	return Proof{proofStart, proofEnd, proofNodes, leafHash, ignoreMaxNamespace, nil}
 }
 
 // IsEmptyProof checks whether the proof corresponds to an empty proof as defined in NMT specifications https://github.com/celestiaorg/nmt/blob/master/docs/spec/nmt.md.
 func (proof Proof) IsEmptyProof() bool {
 	return proof.start == proof.end && len(proof.nodes) == 0 && len(proof.leafHash) == 0
+}
+
+func (proof *Proof) WithHashedProof(hash hash.Hash) {
+	proof.hashForRoot = hash
 }
 
 // VerifyNamespace verifies a whole namespace, i.e. 1) it verifies inclusion of
@@ -163,7 +169,7 @@ func (proof Proof) VerifyNamespace(h hash.Hash, nID namespace.ID, leaves [][]byt
 
 	// perform some consistency checks:
 	// check that the root is valid w.r.t the NMT hasher
-	if err := nth.ValidateNodeFormat(root); err != nil {
+	if err := nth.ValidateNodeFormat(root); err != nil && proof.hashForRoot == nil {
 		return false
 	}
 	// check that all the proof.nodes are valid w.r.t the NMT hasher
@@ -265,7 +271,7 @@ func (proof Proof) VerifyLeafHashes(nth *NmtHasher, verifyCompleteness bool, nID
 		return false, fmt.Errorf("namespace ID size (%d) does not match the namespace size of the NMT hasher (%d)", nID.Size(), nth.NamespaceSize())
 	}
 	// check that the root is valid w.r.t the NMT hasher
-	if err := nth.ValidateNodeFormat(root); err != nil {
+	if err := nth.ValidateNodeFormat(root); err != nil && proof.hashForRoot == nil {
 		return false, fmt.Errorf("root does not match the NMT hasher's hash format: %w", err)
 	}
 	// check that all the proof.nodes are valid w.r.t the NMT hasher
@@ -388,6 +394,15 @@ func (proof Proof) VerifyLeafHashes(nth *NmtHasher, verifyCompleteness bool, nID
 		}
 	}
 
+	if hsh := proof.hashForRoot; hsh != nil {
+		hsh.Reset()
+		_, err := hsh.Write(rootHash)
+		if err != nil {
+			return false, err
+		}
+		rootHash = hsh.Sum(nil)
+	}
+
 	return bytes.Equal(rootHash, root), nil
 }
 
@@ -415,7 +430,7 @@ func (proof Proof) VerifyInclusion(h hash.Hash, nid namespace.ID, leavesWithoutN
 
 	// perform some consistency checks:
 	// check that the root is valid w.r.t the NMT hasher
-	if err := nth.ValidateNodeFormat(root); err != nil {
+	if err := nth.ValidateNodeFormat(root); err != nil && proof.hashForRoot == nil {
 		return false
 	}
 	// check that all the proof.nodes are valid w.r.t the NMT hasher
